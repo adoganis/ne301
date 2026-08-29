@@ -830,6 +830,21 @@ static void main_pipe_frame_event()
             buffer_release_isr(buffer, &g_camera.pipe1_dq);
         }
     }else if(buffer1 != NULL && buffer1->data != NULL){
+        /*
+         * The DCMIPP is about to DMA into buffer1, which buffer_set_ready_isr
+         * marked BUFFER_READY above. Demote it so buffer_get_latest_ready
+         * (state >= BUFFER_READY) cannot hand a consumer a raster that is
+         * still being written. This is the same transition buffer_acquire
+         * performs, for the case where it found nothing to hand out.
+         *
+         * Guarded on buffer == NULL: this branch is also reachable with a
+         * non-NULL buffer whose data is NULL, and there buffer_acquire has
+         * already promoted a different buffer to BUFFER_PROCESSING. Demoting
+         * unconditionally would leave two, and find_processing_buffer takes
+         * the first by index.
+         */
+        if (buffer == NULL)
+            buffer1->state = BUFFER_PROCESSING;
         ret = HAL_DCMIPP_PIPE_SetMemoryAddress(CMW_CAMERA_GetDCMIPPHandle(), DCMIPP_PIPE1,
                                                 DCMIPP_MEMORY_ADDRESS_0, (uint32_t) buffer1->data);
         if(ret == HAL_OK){
@@ -874,6 +889,21 @@ static void ancillary_pipe_frame_event()
             buffer_release_isr(buffer, &g_camera.pipe2_dq);
         }
     }else if(buffer1 != NULL && buffer1->data != NULL){
+        /*
+         * The DCMIPP is about to DMA into buffer1, which buffer_set_ready_isr
+         * marked BUFFER_READY above. Demote it so buffer_get_latest_ready
+         * (state >= BUFFER_READY) cannot hand a consumer a raster that is
+         * still being written. This is the same transition buffer_acquire
+         * performs, for the case where it found nothing to hand out.
+         *
+         * Guarded on buffer == NULL: this branch is also reachable with a
+         * non-NULL buffer whose data is NULL, and there buffer_acquire has
+         * already promoted a different buffer to BUFFER_PROCESSING. Demoting
+         * unconditionally would leave two, and find_processing_buffer takes
+         * the first by index.
+         */
+        if (buffer == NULL)
+            buffer1->state = BUFFER_PROCESSING;
         ret = HAL_DCMIPP_PIPE_SetMemoryAddress(CMW_CAMERA_GetDCMIPPHandle(), DCMIPP_PIPE2,
                                                 DCMIPP_MEMORY_ADDRESS_0, (uint32_t) buffer1->data);
         if(ret == HAL_OK){
