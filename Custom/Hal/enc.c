@@ -402,6 +402,35 @@ static int ENC_H264_Init(enc_t *enc)
     return ret;
 }
 
+/*
+ * A failed encode forces the next frame to INTRA (see encProcess), and only a
+ * success clears that. An INTRA frame is the most expensive one the hardware can
+ * be asked for, so if the forced INTRA also fails the encoder is latched into
+ * retrying only its heaviest operation, with no way back. enc_start starts in the
+ * same forced-INTRA state, so restarting the stream -- or rebooting -- re-enters
+ * the latch immediately. Re-initialise the hardware once a failure run looks
+ * self-sustaining rather than retrying the same wedged state forever.
+ */
+#define ENC_REINIT_FAILURE_THRESHOLD 150  /* ~5 s at 30 fps */
+
+static void ENC_DeInit();
+
+static void ENC_H264_Recover(enc_t *enc)
+{
+    int ret;
+
+    osMutexAcquire(enc->hw_mtx, osWaitForever);
+    ENC_DeInit();
+    ret = ENC_H264_Init(enc);
+    osMutexRelease(enc->hw_mtx);
+
+    if (ret != H264ENC_OK)
+        LOG_DRV_ERROR("encoder re-init failed: %d\r\n", ret);
+    else
+        LOG_DRV_WARN("encoder re-initialised after %d consecutive failures\r\n",
+                     ENC_REINIT_FAILURE_THRESHOLD);
+}
+
 static void ENC_DeInit()
 {
     struct VENC_Context *p_ctx = &VENC_Instance;
@@ -541,6 +570,15 @@ static void encProcess(void *argument)
         /* use event flags to notify the waiters */
         uint32_t flag_to_set = (encode_ret == 0) ? EVT_ENC_DONE : EVT_ENC_ERROR;
         osEventFlagsSet(enc->evt_flags, flag_to_set);
+
+        /* recover the hardware if the failure run is not clearing on its own */
+        if (encode_ret == 0) {
+            enc->consecutive_failures = 0;
+        } else if (++enc->consecutive_failures >= ENC_REINIT_FAILURE_THRESHOLD) {
+            enc->consecutive_failures = 0;
+            if (enc->is_init)
+                ENC_H264_Recover(enc);
+        }
     }
 
     osThreadExit();
@@ -563,6 +601,7 @@ static int enc_start(void *priv)
     }
     enc->state = ENC_IDLE;
     enc->is_intra_force = 1;
+    enc->consecutive_failures = 0;
     osMutexRelease(enc->state_mtx);
 
     /* hardware initialization */

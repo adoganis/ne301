@@ -78,6 +78,7 @@ typedef struct {
     uint8_t *in_buffer;
     enc_out_frame_t out_frame;
     int is_intra_force;
+    int consecutive_failures;
 } enc_t;
 
 int enc_register(void);
