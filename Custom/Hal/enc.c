@@ -198,8 +198,14 @@ static void VENC_H264_SetupVbr(H264EncRateCtrl *rate, int bitrate, int gopLen, i
     rate->mbRc = 1;
     rate->pictureSkip = 0;
     rate->hrd = 0;
-    rate->qpHdr = qp;
-    rate->qpMin = 10;
+    /*
+     * EXPERIMENT (not for merge): raise the QP floor so every frame is
+     * markedly cheaper to encode. Tests whether frame complexity drives the
+     * ASIC's internal watchdog timeout (I-01 / I-03 L2). Built on the same
+     * base cam B already runs, so the QP floor is the only variable.
+     */
+    rate->qpHdr = 32;
+    rate->qpMin = 32;
     rate->qpMax = 51;
     rate->gopLen = gopLen;
     rate->bitPerSecond = bitrate;
