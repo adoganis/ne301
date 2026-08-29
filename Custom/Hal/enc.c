@@ -198,8 +198,12 @@ static void VENC_H264_SetupVbr(H264EncRateCtrl *rate, int bitrate, int gopLen, i
     rate->mbRc = 1;
     rate->pictureSkip = 0;
     rate->hrd = 0;
-    rate->qpHdr = qp;
-    rate->qpMin = 10;
+    /*
+     * EXPERIMENT (not for merge): hard QP floor, far fewer coefficients.
+     * Paired with the coding-control changes in ENC_H264_Init.
+     */
+    rate->qpHdr = 45;
+    rate->qpMin = 45;
     rate->qpMax = 51;
     rate->gopLen = gopLen;
     rate->bitPerSecond = bitrate;
@@ -421,6 +425,17 @@ static int ENC_H264_Init(enc_t *enc)
         return ret;
     }
     ctrl.idrHeader = 1;
+    /*
+     * EXPERIMENT (not for merge): strip per-macroblock ASIC work that QP does
+     * NOT touch. quarterPixelMv=0 removes the quarter-pixel motion estimation
+     * refinement (H264CodeFrame.c:499-501 sets disableQuarterPixelMv), and
+     * disabling the deblocking filter removes a per-macroblock reconstruction
+     * pass. Together with the QP floor this is the strongest reduction in
+     * encode work reachable without changing resolution. Tests whether the
+     * ASIC's internal watchdog is driven by per-frame work at all.
+     */
+    ctrl.quarterPixelMv = 0;
+    ctrl.disableDeblockingFilter = 1;
     ret = H264EncSetCodingCtrl(p_ctx->hdl, &ctrl);
     if(ret != H264ENC_OK){
         return ret;
