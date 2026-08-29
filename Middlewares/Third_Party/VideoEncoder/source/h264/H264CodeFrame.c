@@ -49,8 +49,19 @@
 #include "ewl.h"
 #include "H264CodeFrame.h"
 
+/*
+ * DIAGNOSTIC (KTP, not upstream): H264ENC_HW_TIMEOUT is raised from two distinct
+ * routes and the returned code cannot tell them apart -- EWLWaitHwRdy timing out
+ * on the host side, versus the ASIC's own watchdog bit with the IRQ delivered on
+ * time. Record which one fired; the HAL layer reports it, since this middleware
+ * has no logging compiled in.
+ */
+volatile i32 ktp_venc_ewl_ret = 0;
+volatile u32 ktp_venc_irq_status = 0xFFFFFFFFu;
+
 #ifdef INTERNAL_TEST
 #include "H264TestId.h"
+
 #endif
 
 /*------------------------------------------------------------------------------
@@ -215,10 +226,12 @@ h264EncodeFrame_e H264CodeFrame(h264Instance_s * inst)
         i32 ewl_ret;
 
         /* Wait for IRQ for every slice or for complete frame */
+        ktp_venc_irq_status = 0xFFFFFFFFu;
         if ((inst->slice.sliceSize > 0) && inst->sliceReadyCbFunc)
             ewl_ret = EWLWaitHwRdy(asic->ewl, &slice.slicesReady);
         else
             ewl_ret = EWLWaitHwRdy(asic->ewl, NULL);
+        ktp_venc_ewl_ret = ewl_ret;
 
         if(ewl_ret != EWL_OK)
         {
@@ -247,6 +260,7 @@ h264EncodeFrame_e H264CodeFrame(h264Instance_s * inst)
         {
             /* Check ASIC status bits and possibly release HW */
             status = EncAsicCheckStatus_V2(asic);
+            ktp_venc_irq_status = asic->irqStatus;
 
             switch (status)
             {
