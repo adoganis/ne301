@@ -248,23 +248,39 @@ static int VENC_h264_AppendPadding(struct VENC_Context *p_ctx, uint8_t *p_out, s
  * mismatch or bad parameters. Encode runs at frame rate, so log only when the code
  * changes and then once per 1000 repeats, otherwise the log buffer floods.
  */
-static void VENC_H264_LogRet(const char *site, int ret, int coding_type)
+/*
+ * H264ENC_HW_TIMEOUT (-11) is raised from two routes that the return code cannot
+ * distinguish: EWLWaitHwRdy expiring host-side (ewl_ret == EWL_HW_WAIT_TIMEOUT, 1),
+ * or the ASIC's own watchdog bit with the IRQ delivered on time (ewl_ret == EWL_OK,
+ * 0, and bit 6 set in irq). Only the first is governed by EWL_TIMEOUT. ms is the
+ * wall time across the whole H264EncStrmEncode call.
+ */
+extern volatile int32_t ktp_venc_ewl_ret;
+extern volatile uint32_t ktp_venc_irq_status;
+
+static void VENC_H264_LogRet(const char *site, int ret, int coding_type, uint32_t ms)
 {
     static const char *last_site = NULL;
     static int last_ret = 0x7fffffff;
+    static int32_t last_ewl = 0x7fffffff;
     static uint32_t repeats = 0;
 
-    if (site == last_site && ret == last_ret) {
+    if (site == last_site && ret == last_ret && ktp_venc_ewl_ret == last_ewl) {
         if (++repeats % 1000U != 0U)
             return;
-        LOG_DRV_WARN("VENC %s ret=%d (x%lu)\r\n", site, ret, (unsigned long)repeats);
+        LOG_DRV_WARN("VENC %s ret=%d ewl=%ld irq=0x%lx ms=%lu (x%lu)\r\n", site, ret,
+                     (long)ktp_venc_ewl_ret, (unsigned long)ktp_venc_irq_status,
+                     (unsigned long)ms, (unsigned long)repeats);
         return;
     }
 
     last_site = site;
     last_ret = ret;
+    last_ewl = ktp_venc_ewl_ret;
     repeats = 0;
-    LOG_DRV_WARN("VENC %s ret=%d coding_type=%d\r\n", site, ret, coding_type);
+    LOG_DRV_WARN("VENC %s ret=%d coding_type=%d ewl=%ld irq=0x%lx ms=%lu\r\n", site, ret,
+                 coding_type, (long)ktp_venc_ewl_ret,
+                 (unsigned long)ktp_venc_irq_status, (unsigned long)ms);
 }
 
 static int VENC_H264_EncodeStart(struct VENC_Context *p_ctx, uint8_t *p_out, size_t out_len, size_t *p_out_len)
@@ -280,14 +296,14 @@ static int VENC_H264_EncodeStart(struct VENC_Context *p_ctx, uint8_t *p_out, siz
     enc_in.outBufSize = out_len;
     ret = H264EncStrmStart(p_ctx->hdl, &enc_in, &enc_out);
     if (ret) {
-        VENC_H264_LogRet("StrmStart", ret, -1);
+        VENC_H264_LogRet("StrmStart", ret, -1, 0);
         return ret;
     }
 
     start_len = enc_out.streamSize;
     ret = VENC_h264_AppendPadding(p_ctx, &p_out[start_len], out_len - start_len, &pad_len);
     if (ret) {
-        VENC_H264_LogRet("AppendPadding", ret, -1);
+        VENC_H264_LogRet("AppendPadding", ret, -1, 0);
         return ret;
     }
 
@@ -321,9 +337,10 @@ static int VENC_H264_EncodeFrame(struct VENC_Context *p_ctx, uint8_t *p_in, uint
     enc_in.lineBufWrCnt = 0;
     enc_in.sendAUD = 0;
 
+    uint32_t t0 = HAL_GetTick();
     ret = H264EncStrmEncode(p_ctx->hdl, &enc_in, p_enc_out, NULL, NULL, NULL);
     if (ret != H264ENC_FRAME_READY) {
-        VENC_H264_LogRet("StrmEncode", ret, (int)enc_in.codingType);
+        VENC_H264_LogRet("StrmEncode", ret, (int)enc_in.codingType, HAL_GetTick() - t0);
         return -1;
     }
 
