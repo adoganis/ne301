@@ -241,6 +241,32 @@ static int VENC_h264_AppendPadding(struct VENC_Context *p_ctx, uint8_t *p_out, s
     return 0;
 }
 
+/*
+ * DIAGNOSTIC (KTP, not upstream): the vendor return code from H264EncStrmStart /
+ * H264EncStrmEncode is otherwise flattened to -1 by the callers below, which hides
+ * whether a persistent encode failure is a bus error, a timeout, a fuse/capability
+ * mismatch or bad parameters. Encode runs at frame rate, so log only when the code
+ * changes and then once per 1000 repeats, otherwise the log buffer floods.
+ */
+static void VENC_H264_LogRet(const char *site, int ret, int coding_type)
+{
+    static const char *last_site = NULL;
+    static int last_ret = 0x7fffffff;
+    static uint32_t repeats = 0;
+
+    if (site == last_site && ret == last_ret) {
+        if (++repeats % 1000U != 0U)
+            return;
+        LOG_DRV_WARN("VENC %s ret=%d (x%lu)\r\n", site, ret, (unsigned long)repeats);
+        return;
+    }
+
+    last_site = site;
+    last_ret = ret;
+    repeats = 0;
+    LOG_DRV_WARN("VENC %s ret=%d coding_type=%d\r\n", site, ret, coding_type);
+}
+
 static int VENC_H264_EncodeStart(struct VENC_Context *p_ctx, uint8_t *p_out, size_t out_len, size_t *p_out_len)
 {
     H264EncOut enc_out;
@@ -253,13 +279,17 @@ static int VENC_H264_EncodeStart(struct VENC_Context *p_ctx, uint8_t *p_out, siz
     enc_in.busOutBuf = (ptr_t) p_out;
     enc_in.outBufSize = out_len;
     ret = H264EncStrmStart(p_ctx->hdl, &enc_in, &enc_out);
-    if (ret)
+    if (ret) {
+        VENC_H264_LogRet("StrmStart", ret, -1);
         return ret;
+    }
 
     start_len = enc_out.streamSize;
     ret = VENC_h264_AppendPadding(p_ctx, &p_out[start_len], out_len - start_len, &pad_len);
-    if (ret)
+    if (ret) {
+        VENC_H264_LogRet("AppendPadding", ret, -1);
         return ret;
+    }
 
     *p_out_len = start_len + pad_len;
 
@@ -292,8 +322,10 @@ static int VENC_H264_EncodeFrame(struct VENC_Context *p_ctx, uint8_t *p_in, uint
     enc_in.sendAUD = 0;
 
     ret = H264EncStrmEncode(p_ctx->hdl, &enc_in, p_enc_out, NULL, NULL, NULL);
-    if (ret != H264ENC_FRAME_READY)
+    if (ret != H264ENC_FRAME_READY) {
+        VENC_H264_LogRet("StrmEncode", ret, (int)enc_in.codingType);
         return -1;
+    }
 
     p_ctx->pic_cnt++;
     *p_out_len = p_enc_out->streamSize;
@@ -398,8 +430,55 @@ static int ENC_H264_Init(enc_t *enc)
         return ret;
     }
 
+    /*
+     * DIAGNOSTIC (KTP, not upstream): report the clock tree and the encoder geometry
+     * once per encoder start. The FSBL only applies the persisted sys_clk profile when
+     * it is valid, so a unit with no stored profile silently runs on the HSI fallback;
+     * HSERDY plus the measured frequencies distinguish that from an HSE-locked boot
+     * without needing to touch the FSBL or the persisted record.
+     */
+    LOG_DRV_WARN("VENC clk cpu=%luMHz sys=%luMHz hclk=%luMHz hse_rdy=%d\r\n",
+                 (unsigned long)(HAL_RCC_GetCpuClockFreq() / 1000000UL),
+                 (unsigned long)(HAL_RCC_GetSysClockFreq() / 1000000UL),
+                 (unsigned long)(HAL_RCC_GetHCLKFreq() / 1000000UL),
+                 __HAL_RCC_GET_FLAG(RCC_FLAG_HSERDY) ? 1 : 0);
+    LOG_DRV_WARN("VENC cfg %ux%u@%ufps input_type=%d rc_mode=%d qp=%d gop=%d bitrate=%d\r\n",
+                 (unsigned)enc->params.width, (unsigned)enc->params.height,
+                 (unsigned)enc->params.fps, (int)enc->params.input_type,
+                 (int)enc->params.rate_ctrl_mode, (int)enc->params.rate_ctrl_dq,
+                 (int)p_ctx->gop_len, target_bitrate);
+
     LOG_DRV_DEBUG("ENC_H264_Init end\r\n");
     return ret;
+}
+
+/*
+ * A failed encode forces the next frame to INTRA (see encProcess), and only a
+ * success clears that. An INTRA frame is the most expensive one the hardware can
+ * be asked for, so if the forced INTRA also fails the encoder is latched into
+ * retrying only its heaviest operation, with no way back. enc_start starts in the
+ * same forced-INTRA state, so restarting the stream -- or rebooting -- re-enters
+ * the latch immediately. Re-initialise the hardware once a failure run looks
+ * self-sustaining rather than retrying the same wedged state forever.
+ */
+#define ENC_REINIT_FAILURE_THRESHOLD 150  /* ~5 s at 30 fps */
+
+static void ENC_DeInit();
+
+static void ENC_H264_Recover(enc_t *enc)
+{
+    int ret;
+
+    osMutexAcquire(enc->hw_mtx, osWaitForever);
+    ENC_DeInit();
+    ret = ENC_H264_Init(enc);
+    osMutexRelease(enc->hw_mtx);
+
+    if (ret != H264ENC_OK)
+        LOG_DRV_ERROR("encoder re-init failed: %d\r\n", ret);
+    else
+        LOG_DRV_WARN("encoder re-initialised after %d consecutive failures\r\n",
+                     ENC_REINIT_FAILURE_THRESHOLD);
 }
 
 static void ENC_DeInit()
@@ -541,6 +620,15 @@ static void encProcess(void *argument)
         /* use event flags to notify the waiters */
         uint32_t flag_to_set = (encode_ret == 0) ? EVT_ENC_DONE : EVT_ENC_ERROR;
         osEventFlagsSet(enc->evt_flags, flag_to_set);
+
+        /* recover the hardware if the failure run is not clearing on its own */
+        if (encode_ret == 0) {
+            enc->consecutive_failures = 0;
+        } else if (++enc->consecutive_failures >= ENC_REINIT_FAILURE_THRESHOLD) {
+            enc->consecutive_failures = 0;
+            if (enc->is_init)
+                ENC_H264_Recover(enc);
+        }
     }
 
     osThreadExit();
@@ -563,6 +651,7 @@ static int enc_start(void *priv)
     }
     enc->state = ENC_IDLE;
     enc->is_intra_force = 1;
+    enc->consecutive_failures = 0;
     osMutexRelease(enc->state_mtx);
 
     /* hardware initialization */
