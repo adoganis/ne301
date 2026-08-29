@@ -402,6 +402,45 @@ static int ENC_H264_Init(enc_t *enc)
     return ret;
 }
 
+/*
+ * Cold-start escape.
+ *
+ * H264EncStrmStart leaves encStatus at H264ENCSTAT_START_STREAM
+ * (H264EncApi.c:1636). While it holds that value the library overrides the
+ * requested coding type to INTRA (:1921-1923), discarding whatever the caller
+ * asked for, and the only transition out is on the success path (:2647) -- the
+ * timeout return at :2495 leaves it untouched. So if the first frame after an
+ * encoder init fails, every subsequent frame is forced to a full INTRA and the
+ * only way out is an INTRA that completes.
+ *
+ * Re-initialising does not help: it returns to the same state, which is why
+ * rebooting the device does not clear this condition. Escape needs a cheaper
+ * frame, not another attempt at the same one. Raising the QP floor is a hard
+ * clamp in the rate controller (H264RateControl.c:934), so it reduces the work
+ * the encoder is asked to do regardless of what the model computes.
+ */
+#define ENC_STARTUP_FAILURE_THRESHOLD 30  /* ~1 s at 30 fps */
+#define ENC_STARTUP_QP_STEP           8
+#define ENC_QP_MAX                    51
+
+static int ENC_H264_SetQpFloor(enc_t *enc, int qp_floor)
+{
+    struct VENC_Context *p_ctx = &VENC_Instance;
+    H264EncRateCtrl rate;
+    int ret;
+
+    ret = H264EncGetRateCtrl(p_ctx->hdl, &rate);
+    if (ret != H264ENC_OK)
+        return ret;
+
+    /* qpHdr must stay inside [qpMin, qpMax] or the setter rejects the call */
+    rate.qpMin = qp_floor;
+    if (rate.qpHdr < qp_floor)
+        rate.qpHdr = qp_floor;
+
+    return H264EncSetRateCtrl(p_ctx->hdl, &rate);
+}
+
 static void ENC_DeInit()
 {
     struct VENC_Context *p_ctx = &VENC_Instance;
@@ -512,6 +551,38 @@ static void encProcess(void *argument)
         
 #if USE_H264_VENC
         encode_ret = VENC_H264_Encode(enc);
+
+        /*
+         * Cold-start escape: until one frame has succeeded the library is
+         * forcing INTRA and only a successful INTRA clears it. Retrying is
+         * what a reboot already does, so step the QP floor up instead and
+         * ask the hardware for a cheaper frame. Restore normal quality as
+         * soon as anything gets through.
+         */
+        if (encode_ret == 0) {
+            enc->startup_failures = 0;
+            if (!enc->first_frame_done && enc->qp_floor_step) {
+                if (ENC_H264_SetQpFloor(enc, enc->params.rate_ctrl_dq) == H264ENC_OK)
+                    LOG_DRV_WARN("encoder cold start cleared at QP floor %d, quality restored\r\n",
+                                 enc->params.rate_ctrl_dq + enc->qp_floor_step * ENC_STARTUP_QP_STEP);
+                enc->qp_floor_step = 0;
+            }
+            enc->first_frame_done = 1;
+        } else if (!enc->first_frame_done &&
+                   ++enc->startup_failures >= ENC_STARTUP_FAILURE_THRESHOLD) {
+            int qp_floor = enc->params.rate_ctrl_dq +
+                           (enc->qp_floor_step + 1) * ENC_STARTUP_QP_STEP;
+
+            enc->startup_failures = 0;
+            if (qp_floor <= ENC_QP_MAX) {
+                enc->qp_floor_step++;
+                if (ENC_H264_SetQpFloor(enc, qp_floor) == H264ENC_OK)
+                    LOG_DRV_WARN("encoder produced no frame since init; QP floor raised to %d\r\n",
+                                 qp_floor);
+                else
+                    LOG_DRV_ERROR("encoder cold start: QP floor %d rejected\r\n", qp_floor);
+            }
+        }
 #else
         encode_ret = encode_jpeg_frame(local_in, 
                                        enc->out_frame.frame_buffer + enc->out_frame.header_size,
@@ -563,6 +634,9 @@ static int enc_start(void *priv)
     }
     enc->state = ENC_IDLE;
     enc->is_intra_force = 1;
+    enc->first_frame_done = 0;
+    enc->startup_failures = 0;
+    enc->qp_floor_step = 0;
     osMutexRelease(enc->state_mtx);
 
     /* hardware initialization */
