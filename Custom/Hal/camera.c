@@ -1101,6 +1101,21 @@ static int pipe_stop_common(camera_t *camera, uint32_t pipe_id, pipe_buffer_t **
             *pipe_buffer = NULL;
             return AICAM_OK;
         }else{
+            /*
+             * The pipe did not stop, so *pipe_state stays PIPE_START and the
+             * buffers are still live -- but the frame interrupt was disabled
+             * above. Leaving it off strands the pipe: no frame event ever runs
+             * again, and camera_start short-circuits on the unchanged state
+             * without re-arming it. Put it back so the caller's retry, or a
+             * later start, still has a running pipe.
+             */
+            if (hdcmipp != NULL) {
+                if (pipe_id == DCMIPP_PIPE1) {
+                    __HAL_DCMIPP_ENABLE_IT(hdcmipp, DCMIPP_IT_PIPE1_FRAME | DCMIPP_IT_PIPE1_VSYNC);
+                } else if (pipe_id == DCMIPP_PIPE2) {
+                    __HAL_DCMIPP_ENABLE_IT(hdcmipp, DCMIPP_IT_PIPE2_FRAME | DCMIPP_IT_PIPE2_VSYNC);
+                }
+            }
             LOG_DRV_ERROR("pipe%lu stop failed: %d\r\n", pipe_id, ret);
             return AICAM_ERROR;
         }
