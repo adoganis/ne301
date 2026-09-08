@@ -78,7 +78,7 @@ typedef struct {
     uint8_t *in_buffer;
     enc_out_frame_t out_frame;
     int is_intra_force;
-    int startup_failures;    /* consecutive failed encodes since the last success */
+    int startup_failures;    /* consecutive output-buffer overflows since the last success */
     int qp_floor;            /* QP floor in force; 0 = configured quality */
 } enc_t;
 

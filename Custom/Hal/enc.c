@@ -559,10 +559,20 @@ static void encProcess(void *argument)
         encode_ret = VENC_H264_Encode(enc);
 
         /* QP-floor escape: step the floor up after a run of consecutive
-           failures and hold it for the rest of the session. */
+           output-buffer overflows and hold it for the rest of the session.
+           Gated on H264ENC_OUTPUT_BUFFER_OVERFLOW because raising the floor
+           only makes frames smaller: a bus error, data error, timeout or reset
+           is not a size problem and the ladder cannot clear it. On this SoC the
+           common background failure is H264ENC_HW_TIMEOUT, so counting every
+           return code would let a transient fault leave a recovered stream
+           pinned at a raised floor for the rest of the session. Other failure
+           codes neither advance nor reset the run; only a successful encode
+           does, so an overflow run is still caught if an unrelated error lands
+           in the middle of it. */
         if (encode_ret == 0) {
             enc->startup_failures = 0;
-        } else if (++enc->startup_failures >= ENC_STARTUP_FAILURE_THRESHOLD) {
+        } else if (VENC_Instance.last_enc_ret == H264ENC_OUTPUT_BUFFER_OVERFLOW &&
+                   ++enc->startup_failures >= ENC_STARTUP_FAILURE_THRESHOLD) {
             int qp_floor = (enc->qp_floor ? enc->qp_floor
                                           : enc->params.rate_ctrl_dq) +
                            ENC_STARTUP_QP_STEP;
