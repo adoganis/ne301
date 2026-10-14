@@ -84,6 +84,7 @@ typedef struct {
     uint64_t timestamp_ms;                 // RTC time the result was snapshotted
     char model_name[64];                   // From nn_model_info_t.name
     aicam_bool_t valid;                    // Snapshot holds a publishable result
+    aicam_bool_t consumed;                 // Publisher has taken this beat
 } ai_telemetry_snapshot_t;
 
 static struct {
@@ -1500,6 +1501,7 @@ static void ai_telemetry_result_callback(const nn_result_t *result, uint32_t fra
         snap->model_name[0] = '\0';
     }
     snap->valid = AICAM_TRUE;
+    snap->consumed = AICAM_FALSE;
 
     osMutexRelease(g_ai_telemetry.snapshot_mutex);
 
@@ -1583,10 +1585,11 @@ static void ai_telemetry_publish_json(void)
         return;
     }
 
-    if (!g_ai_telemetry.snapshot.valid) {
+    if (!g_ai_telemetry.snapshot.valid || g_ai_telemetry.snapshot.consumed) {
         osMutexRelease(g_ai_telemetry.snapshot_mutex);
         return;
     }
+    g_ai_telemetry.snapshot.consumed = AICAM_TRUE;
 
     cJSON *root = cJSON_CreateObject();
     if (!root) {
@@ -1645,10 +1648,11 @@ static void ai_telemetry_publish_cbor(void)
         return;
     }
 
-    if (!g_ai_telemetry.snapshot.valid) {
+    if (!g_ai_telemetry.snapshot.valid || g_ai_telemetry.snapshot.consumed) {
         osMutexRelease(g_ai_telemetry.snapshot_mutex);
         return;
     }
+    g_ai_telemetry.snapshot.consumed = AICAM_TRUE;
 
     cbor_enc_t enc;
     cbor_enc_init(&enc, g_ai_telemetry.encode_buf, AI_TELEMETRY_ENCODE_BUF_SIZE);
