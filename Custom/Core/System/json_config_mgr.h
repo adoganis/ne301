@@ -1052,6 +1052,11 @@ aicam_result_t json_config_get_mqtt_service_config(mqtt_service_config_t *mqtt_s
 aicam_result_t json_config_set_mqtt_service_config(const mqtt_service_config_t *mqtt_service_config);
 
 /**
+ * @brief Get the MQTT client id as a NUL-terminated copy
+ */
+void json_config_get_mqtt_client_id(char *client_id, size_t size);
+
+/**
  * @brief Get device service image configuration
  * @param image_config Image configuration structure pointer
  * @return aicam_result_t Operation result

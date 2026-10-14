@@ -1501,6 +1501,12 @@ aicam_result_t json_config_config_to_isp_param(isp_config_t *isp_config, ISP_IQP
      return AICAM_OK;
  }
 
+ void json_config_get_mqtt_client_id(char *client_id, size_t size)
+ {
+     strncpy(client_id, g_json_config_ctx.current_config.mqtt_service.base_config.client_id, size - 1);
+     client_id[size - 1] = '\0';
+ }
+
  aicam_result_t json_config_set_mqtt_service_config(const mqtt_service_config_t *mqtt_service_config)
  {
      if (!mqtt_service_config)
