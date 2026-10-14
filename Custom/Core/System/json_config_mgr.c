@@ -289,7 +289,9 @@
         .telemetry_enabled = AICAM_FALSE,
         .telemetry_topic = "aicam/data/telemetry",
         .telemetry_qos = 0,
-        .telemetry_format = MQTT_TELEMETRY_FORMAT_JSON
+        .telemetry_format = MQTT_TELEMETRY_FORMAT_JSON,
+        .telemetry_batch_ms = 0,
+        .telemetry_batch_bytes = MQTT_TELEMETRY_BATCH_BYTES_DEFAULT
     }
  };
 
