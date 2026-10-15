@@ -2083,7 +2083,10 @@ static uint32_t ai_telemetry_batch_left_ms(uint32_t batch_ms)
 static aicam_bool_t ai_telemetry_batch_step(void)
 {
     ai_telemetry_batch_t *batch = &g_ai_telemetry.batch;
-    uint16_t batch_ms = mqtt_service_get_telemetry_batch_ms();
+    // The Si91x client used during remote wakeup drops payloads over 1800 B, so
+    // beats go one per message there, as with batching off
+    uint16_t batch_ms = (mqtt_service_get_api_type() == MQTT_API_TYPE_SI91X)
+                            ? 0 : mqtt_service_get_telemetry_batch_ms();
     int json = (mqtt_service_get_telemetry_format() == MQTT_TELEMETRY_FORMAT_JSON);
 
     if (!mqtt_service_get_telemetry_enabled()) {
