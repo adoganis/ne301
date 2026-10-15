@@ -550,7 +550,15 @@ aicam_result_t json_config_load_capture_upload_from_nvs(capture_upload_config_t 
     return AICAM_OK;
 }
 
+#define CERT_DIR              "/certs"
 #define WEBHOOK_CA_CERT_PATH  "/certs/webhook_ca.pem"
+
+void json_config_ensure_cert_dir(void)
+{
+    /* Nothing else creates it on a new flash. An existing directory is fine, and
+     * a real failure shows up in the open that follows. */
+    flash_lfs_mkdir(CERT_DIR);
+}
 
 aicam_result_t json_config_get_webhook_ca_cert(char **cert_data, size_t *cert_len)
 {
@@ -595,6 +603,7 @@ aicam_result_t json_config_set_webhook_ca_cert(const char *cert_data, size_t cer
 {
     if (!cert_data || cert_len == 0) return AICAM_ERROR_INVALID_PARAM;
 
+    json_config_ensure_cert_dir();
     void *fd = flash_lfs_fopen(WEBHOOK_CA_CERT_PATH, "w");
     if (!fd) {
         LOG_CORE_ERROR("Failed to open webhook CA cert file for writing");
