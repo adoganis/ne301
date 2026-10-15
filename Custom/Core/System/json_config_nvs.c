@@ -555,9 +555,12 @@ aicam_result_t json_config_load_capture_upload_from_nvs(capture_upload_config_t 
 
 void json_config_ensure_cert_dir(void)
 {
-    /* Nothing else creates it on a new flash. An existing directory is fine, and
-     * a real failure shows up in the open that follows. */
-    flash_lfs_mkdir(CERT_DIR);
+    /* Nothing else creates it on a new flash. Stat first, as upload_coordinator.c
+     * does: lfs_mkdir runs a consistency pass before it checks the path exists. */
+    struct stat st = {0};
+    if (flash_lfs_stat(CERT_DIR, &st) != 0) {
+        flash_lfs_mkdir(CERT_DIR);
+    }
 }
 
 aicam_result_t json_config_get_webhook_ca_cert(char **cert_data, size_t *cert_len)
